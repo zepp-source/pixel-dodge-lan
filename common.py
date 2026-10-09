@@ -1,91 +1,101 @@
 import json
-import os
 import socket
 import struct
 from typing import Any, Dict, Optional, Tuple
 
 PORT = 9000
+HOST = "127.0.0.1"
 HEADER_SIZE = 4
-DEFAULT_HOST = "127.0.0.1"
-LEADERBOARD_FILE = "leaderboard.json"
+WORLD_WIDTH = 960
+WORLD_HEIGHT = 540
+PLAYER_RADIUS = 15
+ENEMY_MIN_RADIUS = 14
+ENEMY_MAX_RADIUS = 22
+PLAYER_SPEED = 520.0
+RESPAWN_DELAY = 1.5
+MAX_MESSAGE_SIZE = 1024 * 100
+
+COLOR_BG = (9, 14, 22)
+COLOR_PANEL = (18, 30, 44)
+COLOR_SURFACE = (22, 36, 52)
+COLOR_TEXT = (235, 240, 245)
+COLOR_MUTED = (136, 154, 170)
+COLOR_PRIMARY = (94, 215, 165)
+COLOR_ACCENT = (255, 110, 96)
+COLOR_DANGER = (255, 86, 86)
+COLOR_SUCCESS = (112, 214, 123)
 
 
-def encode_message(msg: Dict[str, Any]) -> bytes:
-    payload = json.dumps(msg, separators=(",", ":")).encode("utf-8")
-    return struct.pack(">I", len(payload)) + payload
+def send_message(sock: socket.socket, msg: Dict[str, Any]) -> bool:
+    try:
+        payload = json.dumps(msg, separators=(",", ":")).encode("utf-8")
+        header = struct.pack(">I", len(payload))
+        sock.sendall(header + payload)
+        return True
+    except (BrokenPipeError, OSError, TypeError):
+        return False
+
+
+def recv_exact(sock: socket.socket, n: int) -> bytes:
+    chunks = bytearray()
+    while len(chunks) < n:
+        chunk = sock.recv(n - len(chunks))
+        if not chunk:
+            return b""
+        chunks.extend(chunk)
+    return bytes(chunks)
 
 
 def decode_message(sock: socket.socket) -> Optional[Dict[str, Any]]:
     try:
-        header = sock.recv(HEADER_SIZE)
+        header = recv_exact(sock, HEADER_SIZE)
         if not header:
             return None
-        if len(header) != HEADER_SIZE:
-            return None
         length = struct.unpack(">I", header)[0]
-        chunks = []
-        remaining = length
-        while remaining > 0:
-            chunk = sock.recv(remaining)
-            if not chunk:
-                return None
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        raw = b"".join(chunks)
-        return json.loads(raw.decode("utf-8"))
-    except (socket.timeout, ConnectionError, ValueError, json.JSONDecodeError):
+        if length <= 0 or length > MAX_MESSAGE_SIZE:
+            return None
+        payload = recv_exact(sock, length)
+        if not payload:
+            return None
+        return json.loads(payload.decode("utf-8"))
+    except (ValueError, json.JSONDecodeError, OSError, TypeError):
         return None
-
-
-def send_message(sock: socket.socket, msg: Dict[str, Any]) -> None:
-    try:
-        sock.sendall(encode_message(msg))
-    except (BrokenPipeError, OSError):
-        pass
 
 
 def clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
-def host_ip_from_env() -> str:
-    return os.environ.get("PIXEL_DODGE_HOST", DEFAULT_HOST)
-
-
-def load_leaderboard(path: str = LEADERBOARD_FILE) -> list:
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-            if isinstance(data, list):
-                return data
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        pass
-    return []
-
-
-def save_leaderboard(entries: list, path: str = LEADERBOARD_FILE) -> None:
-    try:
-        with open(path, "w", encoding="utf-8") as fh:
-            json.dump(entries[:10], fh, ensure_ascii=False, indent=2)
-    except OSError:
-        pass
-
-
-def push_leaderboard_entry(name: str, score: float, path: str = LEADERBOARD_FILE) -> None:
-    records = load_leaderboard(path)
-    records.append({"name": name[:18], "score": round(score, 2), "timestamp": int(__import__("time").time())})
-    records = sorted(records, key=lambda item: item.get("score", 0), reverse=True)[:10]
-    save_leaderboard(records, path)
+def dist(x1: float, y1: float, x2: float, y2: float) -> float:
+    return ((x1 - x2) ** 2 + (y1 - y2) ** 2) ** 0.5
 
 
 def player_color(player_id: str) -> Tuple[int, int, int]:
     palette = [
-        (120, 230, 170),
-        (130, 185, 255),
+        (110, 220, 180),
+        (155, 170, 255),
         (255, 170, 110),
-        (255, 120, 170),
-        (185, 210, 255),
-        (170, 255, 210),
+        (255, 120, 140),
+        (150, 200, 255),
+        (185, 255, 150),
+        (255, 200, 110),
     ]
     idx = abs(hash(player_id)) % len(palette)
     return palette[idx]
+
+
+def load_json(path: str, default):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return default
+
+
+def save_json(path: str, data) -> None:
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except OSError:
+        pass

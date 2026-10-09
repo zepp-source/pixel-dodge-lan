@@ -1,43 +1,48 @@
-# Pixel Dodge LAN
+# Run! Run! Run!
 
-A fast, clean LAN multiplayer survival game built in Python with Pygame and TCP sockets.
+A clean, fast LAN survival game built in Python with Pygame and TCP networking.
 
-Features:
-- Minimal circular-player arcade gameplay
+## Features
+- Minimal arcade style with clean dark UI
 - Mouse-controlled movement
-- Clean dark neon UI
-- Real-time LAN multiplayer via TCP
-- Live leaderboard synced across clients
-- Procedural music and SFX generated in code
-- Server + client split into separate modules
+- Real-time multiplayer over LAN
+- Live leaderboard synced across players
+- Quick host/join flow
+- Simple local settings and sound toggles
+- No AI fluff, no clutter, no cringe
 
-Requirements:
+## Requirements
 - Python 3.10+
 - pygame
 
-Install:
+## Install
 ```bash
 pip install -r requirements.txt
 ```
 
-Run the server (host machine):
+## Run a server
 ```bash
 python server.py --host 0.0.0.0 --port 9000
 ```
 
-Run the client (on any machine on the same LAN):
+## Run a client
 ```bash
-python client.py --host 192.168.1.10 --name You
+python client.py --host 192.168.1.10 --name "Alex"
 ```
 
-Optional: if you're on the same machine, use `127.0.0.1`.
+## Quick launcher
+```bash
+python game.py --server
+python game.py --host 192.168.1.10 --name "Alex"
+```
 
-Controls:
-- Move mouse to steer your circle
-- Survive as long as possible
+## Controls
+- Move with the mouse
 - Avoid incoming enemy circles
+- Survive as long as possible
+- Climb the leaderboard
 
-Notes:
-- The server keeps the authoritative game state.
-- The leaderboard is saved on the server machine in `leaderboard.json`.
-- If you want a clean local-only quick test, run the server and client on the same PC.
+## Notes
+- Server is authoritative and sends world state every tick
+- Leaderboard saved to `leaderboard.json`
+- Works best on a local school LAN

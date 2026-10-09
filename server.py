@@ -1,103 +1,282 @@
-import math
+#!/usr/bin/env python3
+import argparse
+import json
 import random
+import socket
+import threading
 import time
+from pathlib import Path
 
-import pygame
+from common import (
+    HOST,
+    PORT,
+    PLAYER_RADIUS,
+    PLAYER_SPEED,
+    RESPAWN_DELAY,
+    WORLD_HEIGHT,
+    WORLD_WIDTH,
+    clamp,
+    decode_message,
+    dist,
+    load_json,
+    player_color,
+    save_json,
+    send_message,
+)
+
+LEADERBOARD_FILE = Path("leaderboard.json")
 
 
-class AudioSystem:
-    def __init__(self) -> None:
-        self.enabled = False
-        self.music_channel = None
-        self.pattern = []
-        self.step = 0
-        self.last_tick = 0.0
-        self.sfx_hit = None
-        self.sfx_spawn = None
-        self.sfx_score = None
+class Player:
+    def __init__(self, client_id: str, name: str):
+        self.client_id = client_id
+        self.name = name[:18]
+        self.x = WORLD_WIDTH * 0.5 + random.uniform(-80, 80)
+        self.y = WORLD_HEIGHT * 0.5 + random.uniform(-60, 60)
+        self.target_x = self.x
+        self.target_y = self.y
+        self.r = PLAYER_RADIUS
+        self.score = 0.0
+        self.alive = True
+        self.spawn_time = time.monotonic()
+        self.death_time = 0.0
+        self.color = player_color(client_id)
 
-        if not pygame.mixer.get_init():
+
+class Enemy:
+    def __init__(self, x: float, y: float, radius: float, speed: float):
+        self.x = x
+        self.y = y
+        self.r = radius
+        self.speed = speed
+
+
+class GameServer:
+    def __init__(self, host: str, port: int):
+        self.host = host
+        self.port = port
+        self.running = True
+        self.lock = threading.RLock()
+        self.players = {}
+        self.connections = {}
+        self.enemies = []
+        self.leaderboard = self.load_leaderboard()
+        self.spawn_timer = 0.5
+        self.next_client_id = 1
+
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self.sock.bind((host, port))
+        self.sock.listen(32)
+
+    def load_leaderboard(self):
+        data = load_json(str(LEADERBOARD_FILE), [])
+        if not isinstance(data, list):
+            return []
+        return data
+
+    def save_leaderboard(self):
+        save_json(str(LEADERBOARD_FILE), self.leaderboard[:10])
+
+    def start(self):
+        accept_thread = threading.Thread(target=self.accept_loop, daemon=True)
+        accept_thread.start()
+        try:
+            self.game_loop()
+        except KeyboardInterrupt:
+            self.shutdown()
+
+    def accept_loop(self):
+        while self.running:
             try:
-                pygame.mixer.pre_init(44100, -16, 2, 512)
-                pygame.mixer.init()
-                self.enabled = True
-            except Exception:
-                self.enabled = False
+                conn, addr = self.sock.accept()
+            except OSError:
+                break
+            conn.settimeout(0.2)
+            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            client_id = f"p{self.next_client_id}"
+            self.next_client_id += 1
+            self.connections[client_id] = conn
+            threading.Thread(target=self.handle_client, args=(client_id, conn), daemon=True).start()
 
-        if self.enabled:
-            self._build_sfx()
-            self._start_music()
+    def handle_client(self, client_id: str, conn: socket.socket):
+        while self.running:
+            try:
+                msg = decode_message(conn)
+            except socket.timeout:
+                continue
+            if msg is None:
+                break
 
-    def _tone(self, frequency: float, duration: float = 0.08, volume: float = 0.18) -> bytes:
-        sample_rate = 44100
-        frames = int(sample_rate * duration)
-        data = []
-        for i in range(frames):
-            t = i / sample_rate
-            wave = math.sin(2 * math.pi * frequency * t)
-            wave += 0.35 * math.sin(2 * math.pi * (frequency * 0.5) * t)
-            value = max(-1.0, min(1.0, wave)) * 32767 * volume
-            data.append(int(value))
-            data.append(int(value))
-        return (pygame.mixer.Sound(buffer=bytes([0])) if False else b"").__class__
+            msg_type = msg.get("type")
+            payload = msg.get("payload", {})
 
-    def _build_sfx(self) -> None:
-        self.sfx_spawn = self._make_sound(660, 0.07, 0.18)
-        self.sfx_hit = self._make_sound(180, 0.18, 0.28)
-        self.sfx_score = self._make_sound(440, 0.10, 0.22)
+            if msg_type == "hello":
+                name = str(payload.get("name", "Player")).strip()[:18] or "Player"
+                with self.lock:
+                    self.players[client_id] = Player(client_id, name)
+                send_message(conn, {"type": "welcome", "payload": {"id": client_id}})
+                print(f"player joined: {name} ({client_id})")
 
-    def _make_sound(self, frequency: float, duration: float, volume: float):
-        sample_rate = 44100
-        frames = int(sample_rate * duration)
-        raw = bytearray()
-        for i in range(frames):
-            t = i / sample_rate
-            wave = math.sin(2 * math.pi * frequency * t)
-            wave += 0.45 * math.sin(2 * math.pi * frequency * 2 * t)
-            sample = int(max(-1.0, min(1.0, wave)) * 32767 * volume)
-            raw.extend(int(sample).to_bytes(2, byteorder="little", signed=True))
-            raw.extend(int(sample).to_bytes(2, byteorder="little", signed=True))
-        return pygame.mixer.Sound(buffer=raw)
+            elif msg_type == "input":
+                with self.lock:
+                    player = self.players.get(client_id)
+                    if not player:
+                        continue
+                    player.target_x = clamp(float(payload.get("x", player.x)), 0, WORLD_WIDTH)
+                    player.target_y = clamp(float(payload.get("y", player.y)), 0, WORLD_HEIGHT)
 
-    def _start_music(self):
-        self.pattern = [220, 277, 330, 392, 330, 277, 220, 196]
-        self.step = 0
-        self.last_tick = time.monotonic()
-        self.music_channel = pygame.mixer.Channel(0)
-        self.music_channel.set_volume(0.12)
-        self._tick_music()
+            elif msg_type == "ping":
+                send_message(conn, {"type": "pong", "payload": {}})
 
-    def _tick_music(self):
-        if not self.enabled or self.music_channel is None:
-            return
-        if self.step >= len(self.pattern):
-            self.step = 0
-        f = self.pattern[self.step]
-        self.music_channel.play(self._make_sound(f, 0.18, 0.08), loops=0)
-        self.step += 1
+        with self.lock:
+            self.players.pop(client_id, None)
+            self.connections.pop(client_id, None)
+        try:
+            conn.close()
+        except OSError:
+            pass
 
-    def update(self):
-        if not self.enabled:
-            return
-        now = time.monotonic()
-        if now - self.last_tick >= 0.18:
-            self.last_tick = now
-            self._tick_music()
+    def spawn_enemy(self):
+        side = random.choice(["left", "right", "top", "bottom"])
+        if side == "left":
+            x, y = -50, random.uniform(40, WORLD_HEIGHT - 40)
+        elif side == "right":
+            x, y = WORLD_WIDTH + 50, random.uniform(40, WORLD_HEIGHT - 40)
+        elif side == "top":
+            x, y = random.uniform(30, WORLD_WIDTH - 30), -50
+        else:
+            x, y = random.uniform(30, WORLD_WIDTH - 30), WORLD_HEIGHT + 50
 
-    def play_spawn(self):
-        if self.enabled and self.sfx_spawn:
-            self.sfx_spawn.play()
+        radius = random.randint(14, 22)
+        speed = random.uniform(180, 260)
+        self.enemies.append(Enemy(x, y, radius, speed))
 
-    def play_hit(self):
-        if self.enabled and self.sfx_hit:
-            self.sfx_hit.play()
+    def update_game(self, dt: float):
+        with self.lock:
+            if not self.players:
+                self.enemies.clear()
+                return
 
-    def play_score(self):
-        if self.enabled and self.sfx_score:
-            self.sfx_score.play()
+            self.spawn_timer -= dt
+            if self.spawn_timer <= 0:
+                self.spawn_enemy()
+                self.spawn_timer = max(0.5, 1.1 - len(self.enemies) * 0.025)
+
+            for player in self.players.values():
+                if not player.alive:
+                    if time.monotonic() - player.death_time > RESPAWN_DELAY:
+                        player.x = WORLD_WIDTH * 0.5 + random.uniform(-100, 100)
+                        player.y = WORLD_HEIGHT * 0.5 + random.uniform(-100, 100)
+                        player.target_x = player.x
+                        player.target_y = player.y
+                        player.alive = True
+                        player.spawn_time = time.monotonic()
+                    continue
+
+                dx = player.target_x - player.x
+                dy = player.target_y - player.y
+                step = dist(player.x, player.y, player.target_x, player.target_y)
+                if step > 0.1:
+                    move = min(PLAYER_SPEED * dt, step)
+                    player.x += (dx / step) * move
+                    player.y += (dy / step) * move
+
+                player.x = clamp(player.x, player.r, WORLD_WIDTH - player.r)
+                player.y = clamp(player.y, player.r, WORLD_HEIGHT - player.r)
+                player.score = max(0.0, time.monotonic() - player.spawn_time)
+
+            # enemy AI: each enemy chases nearest alive player
+            for enemy in list(self.enemies):
+                target = None
+                nearest_dist = 1e9
+                for player in self.players.values():
+                    if not player.alive:
+                        continue
+                    d = dist(player.x, player.y, enemy.x, enemy.y)
+                    if d < nearest_dist:
+                        nearest_dist = d
+                        target = player
+
+                if target is not None:
+                    dx = target.x - enemy.x
+                    dy = target.y - enemy.y
+                    d = dist(enemy.x, enemy.y, target.x, target.y) or 1.0
+                    enemy.x += (dx / d) * enemy.speed * dt
+                    enemy.y += (dy / d) * enemy.speed * dt
+
+                if enemy.x < -80 or enemy.x > WORLD_WIDTH + 80 or enemy.y < -80 or enemy.y > WORLD_HEIGHT + 80:
+                    self.enemies.remove(enemy)
+                    continue
+
+                for player in self.players.values():
+                    if not player.alive:
+                        continue
+                    if dist(player.x, player.y, enemy.x, enemy.y) < (player.r + enemy.r):
+                        player.alive = False
+                        player.death_time = time.monotonic()
+                        player.score = max(0.0, time.monotonic() - player.spawn_time)
+                        score_entry = {"name": player.name, "score": round(player.score, 2), "timestamp": int(time.time())}
+                        self.leaderboard.append(score_entry)
+                        self.leaderboard = sorted(self.leaderboard, key=lambda x: x.get("score", 0), reverse=True)[:10]
+                        self.save_leaderboard()
+                        break
+
+    def broadcast_state(self):
+        with self.lock:
+            state = {
+                "type": "state",
+                "payload": {
+                    "players": [
+                        {
+                            "id": pid,
+                            "name": p.name,
+                            "x": round(p.x, 2),
+                            "y": round(p.y, 2),
+                            "r": p.r,
+                            "alive": p.alive,
+                            "score": round(p.score, 2),
+                            "color": p.color,
+                        }
+                        for pid, p in self.players.items()
+                    ],
+                    "enemies": [{"x": round(e.x, 2), "y": round(e.y, 2), "r": e.r} for e in self.enemies],
+                    "leaderboard": self.leaderboard,
+                },
+            }
+            for conn in list(self.connections.values()):
+                send_message(conn, state)
+
+    def game_loop(self):
+        last = time.monotonic()
+        while self.running:
+            now = time.monotonic()
+            dt = max(0.016, min(0.05, now - last))
+            last = now
+            self.update_game(dt)
+            self.broadcast_state()
+            time.sleep(1 / 60)
+
+    def shutdown(self):
+        self.running = False
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+        for conn in self.connections.values():
+            try:
+                conn.close()
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":
-    pygame.init()
-    audio = AudioSystem()
-    print("audio ready")
+    parser = argparse.ArgumentParser(description="Run! Run! Run! server")
+    parser.add_argument("--host", default=HOST)
+    parser.add_argument("--port", type=int, default=PORT)
+    args = parser.parse_args()
+
+    server = GameServer(args.host, args.port)
+    print(f"server listening on {args.host}:{args.port}")
+    server.start()
