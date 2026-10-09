@@ -58,6 +58,8 @@ class Client:
         self.state = {"players": [], "enemies": [], "leaderboard": []}
         self.mode = "menu"
         self.last_input_sent = 0.0
+        self.player_alive = False
+        self.death_timer = 0.0
 
         self.clock = pygame.time.Clock()
         self.font_title = pygame.font.SysFont("Arial", 28, bold=True)
@@ -65,7 +67,6 @@ class Client:
         self.font_med = pygame.font.SysFont("Arial", 18)
         self.font_small = pygame.font.SysFont("Arial", 14)
 
-        # UI elements
         self.name_input = pygame.Rect(180, 180, 360, 46)
         self.host_input = pygame.Rect(180, 240, 360, 46)
         self.start_btn = pygame.Rect(180, 330, 170, 52)
@@ -90,6 +91,8 @@ class Client:
             send_message(self.sock, {"type": "hello", "payload": {"name": self.name}})
             threading.Thread(target=self.receive_loop, daemon=True).start()
             self.mode = "playing"
+            self.player_alive = True
+            self.death_timer = 0.0
             return True
         except (OSError, ConnectionError):
             self.mode = "menu"
@@ -107,6 +110,13 @@ class Client:
                 self.player_id = msg["payload"].get("id")
             elif msg.get("type") == "state":
                 self.state = msg.get("payload", {})
+                for p in self.state.get("players", []):
+                    if p.get("id") == self.player_id:
+                        prev_alive = self.player_alive
+                        self.player_alive = p.get("alive", False)
+                        if prev_alive and not self.player_alive:
+                            self.death_timer = time.time()
+                        break
             elif msg.get("type") == "pong":
                 pass
         self.connected = False
@@ -129,7 +139,6 @@ class Client:
     def render_game(self, screen):
         self.render_background(screen)
 
-        # enemies
         for enemy in self.state.get("enemies", []):
             x = int(enemy["x"])
             y = int(enemy["y"])
@@ -137,7 +146,6 @@ class Client:
             pygame.draw.circle(screen, COLOR_ACCENT, (x, y), r)
             pygame.draw.circle(screen, (255, 160, 130), (x, y), r, 2)
 
-        # players
         for player in self.state.get("players", []):
             x = int(player["x"])
             y = int(player["y"])
@@ -152,7 +160,6 @@ class Client:
                 pygame.draw.circle(s, (*color, 120), (r, r), r)
                 screen.blit(s, (x - r, y - r))
 
-        # HUD
         my_name = self.name
         my_score = 0.0
         players_count = len(self.state.get("players", []))
@@ -181,17 +188,16 @@ class Client:
 
         pygame.draw.rect(screen, COLOR_PANEL, self.name_input, border_radius=8)
         pygame.draw.rect(screen, COLOR_PANEL, self.host_input, border_radius=8)
-        pygame.draw.rect(screen, screen.get_at((0, 0))[:3], self.start_btn, border_radius=8)
+        pygame.draw.rect(screen, COLOR_PANEL, self.start_btn, border_radius=8)
         pygame.draw.rect(screen, COLOR_PANEL, self.settings_btn, border_radius=8)
 
-        # border / buttons
         pygame.draw.rect(screen, COLOR_PRIMARY if self.focus_name else COLOR_MUTED, self.name_input, 2, border_radius=8)
         pygame.draw.rect(screen, COLOR_PRIMARY if self.focus_host else COLOR_MUTED, self.host_input, 2, border_radius=8)
         pygame.draw.rect(screen, COLOR_PRIMARY, self.start_btn, 2, border_radius=8)
         pygame.draw.rect(screen, COLOR_MUTED, self.settings_btn, 2, border_radius=8)
 
-        name_text = self.font_med.render(self.name, True, COLOR_TEXT)
-        host_text = self.font_med.render(self.host, True, COLOR_TEXT)
+        name_text = self.font_med.render(self.name[:16] if self.name else "Enter name", True, COLOR_TEXT if self.name else COLOR_MUTED)
+        host_text = self.font_med.render(self.host if self.host else HOST, True, COLOR_TEXT)
         screen.blit(name_text, (self.name_input.x + 12, self.name_input.y + 12))
         screen.blit(host_text, (self.host_input.x + 12, self.host_input.y + 12))
 
@@ -205,7 +211,6 @@ class Client:
         title = self.font_title.render("Settings", True, COLOR_PRIMARY)
         screen.blit(title, (180, 80))
 
-        # toggles
         sound_box = pygame.Rect(180, 180, 220, 48)
         fullscreen_box = pygame.Rect(180, 250, 220, 48)
         back_box = pygame.Rect(180, 420, 160, 50)
@@ -213,6 +218,10 @@ class Client:
         pygame.draw.rect(screen, COLOR_PANEL, sound_box, border_radius=8)
         pygame.draw.rect(screen, COLOR_PANEL, fullscreen_box, border_radius=8)
         pygame.draw.rect(screen, COLOR_PANEL, back_box, border_radius=8)
+
+        pygame.draw.rect(screen, COLOR_MUTED, sound_box, 2, border_radius=8)
+        pygame.draw.rect(screen, COLOR_MUTED, fullscreen_box, 2, border_radius=8)
+        pygame.draw.rect(screen, COLOR_MUTED, back_box, 2, border_radius=8)
 
         sound_label = self.font_med.render(f"Sound: {'ON' if self.sound else 'OFF'}", True, COLOR_TEXT)
         fullscreen_label = self.font_med.render(f"Fullscreen: {'ON' if self.fullscreen else 'OFF'}", True, COLOR_TEXT)
@@ -232,6 +241,10 @@ class Client:
         pygame.draw.rect(screen, COLOR_PANEL, self.play_again_btn, border_radius=8)
         pygame.draw.rect(screen, COLOR_PANEL, self.leaderboard_btn, border_radius=8)
         pygame.draw.rect(screen, COLOR_PANEL, self.back_btn, border_radius=8)
+
+        pygame.draw.rect(screen, COLOR_MUTED, self.play_again_btn, 2, border_radius=8)
+        pygame.draw.rect(screen, COLOR_MUTED, self.leaderboard_btn, 2, border_radius=8)
+        pygame.draw.rect(screen, COLOR_MUTED, self.back_btn, 2, border_radius=8)
 
         play_text = self.font_med.render("Play Again", True, COLOR_TEXT)
         leader_text = self.font_med.render("Leaderboard", True, COLOR_TEXT)
@@ -257,6 +270,7 @@ class Client:
                 screen.blit(text, (180, 120 + idx * 28))
 
         pygame.draw.rect(screen, COLOR_PANEL, self.back_btn, border_radius=8)
+        pygame.draw.rect(screen, COLOR_MUTED, self.back_btn, 2, border_radius=8)
         back_text = self.font_med.render("Back", True, COLOR_TEXT)
         screen.blit(back_text, (self.back_btn.x + 58, self.back_btn.y + 15))
 
@@ -325,13 +339,17 @@ class Client:
             elif self.mode == "gameover":
                 if event.type == pygame.MOUSEBUTTONDOWN:
                     if self.play_again_btn.collidepoint(event.pos):
-                        self.mode = "playing"
                         self.connect()
                     elif self.leaderboard_btn.collidepoint(event.pos):
                         self.mode = "leaderboard"
                     elif self.back_btn.collidepoint(event.pos):
                         self.mode = "menu"
-	self.render(screen)
+                        self.connected = False
+                        if self.sock:
+                            try:
+                                self.sock.close()
+                            except:
+                                pass
 
     def render(self, screen):
         if self.mode == "menu":
@@ -350,14 +368,21 @@ class Client:
         self.name = self.settings.get("name", "Player")
         self.host = self.settings.get("host", HOST)
 
-        screen = pygame.display.set_mode((960, 540), pygame.FULLSCREEN if self.settings.get("fullscreen", False) else 0)
+        flags = pygame.FULLSCREEN if self.settings.get("fullscreen", False) else 0
+        screen = pygame.display.set_mode((960, 540), flags)
         pygame.display.set_caption("Run! Run! Run!")
 
         while self.running:
             self.handle_events(pygame.event.get())
             dt = self.clock.tick(60) / 1000.0
+
             if self.mode == "playing":
                 self.send_input()
+                if not self.player_alive and self.death_timer > 0:
+                    if time.time() - self.death_timer > 1.5:
+                        self.mode = "gameover"
+                        self.death_timer = 0.0
+
             self.render(screen)
             pygame.display.flip()
 
